@@ -8,6 +8,10 @@
 #define ROUND(x) ((x < 0)?(int)(x-0.5):(int)(x+0.5))
 #define GetVoxelIndex(s,v) ((v.x)+(s)->tby[(v.y)]+(s)->tbz[(v.z)])
 
+
+int RADIUS_THRESHOLD=2;
+
+
 int VoxelValue(iftImage *img, iftVoxel v)
 {
     return img->val[GetVoxelIndex(img, v)];
@@ -121,25 +125,31 @@ int DDA(iftImage *img, iftVoxel p1, iftVoxel pn)
     p.y = p1.y;
     p.z = p1.z;
 
-
+    int validP=0;
     for (k = 1; k < n; k++)
     {
         //printf("debug\n");
         //J+=  (float)LinearInterpolationValue(img, px, py);
         //J+=  iftImgVal2D(img, (int)px, (int)py);
+
         if (isValidPoint(img,p)){
+
+
           //J= iftImgVal(img,p.x,p.y,p.z);
 
           iftPoint aux;
           aux.x = p.x;
           aux.y = p.y;
           aux.z = p.z;
+          max = iftImageValueAtPoint(img,aux);
+          break;
 
           // pegando o ponto com interpolacao
           J= iftImageValueAtPoint(img,aux);
-          
+
           if (J>max)
             max=J;
+          validP++;
         }
 
         p.x = p.x + dx;
@@ -175,7 +185,7 @@ int ComputeIntersection(iftMatrix *Tpo, iftImage *img, iftMatrix *Tn, iftVolumeF
     iftMatrix *DiffCandP0 = iftCreateMatrix(1, 3);
     float NdotNj = 0, DiffShiftDotNj = 0;
     iftVector v1, v2, v3;
-    iftVoxel v; 
+    iftVoxel v;
 
 
     for (i = 0; i < 6; i++) {
@@ -194,18 +204,18 @@ int ComputeIntersection(iftMatrix *Tpo, iftImage *img, iftMatrix *Tn, iftVolumeF
         iftMatrixElem(DiffCandP0, 0, 0) = vf[i].center->val[0] - Tpo->val[0];
         iftMatrixElem(DiffCandP0, 0, 1) = vf[i].center->val[1] - Tpo->val[1];
         iftMatrixElem(DiffCandP0, 0, 2) = vf[i].center->val[2] - Tpo->val[2];
-        
+
         v3 = columnVectorMatrixToVector(DiffCandP0);
 
         DiffShiftDotNj = iftVectorInnerProduct(v1,v3);
         //DiffShiftDotNj = MatrixInnerProduct(Nj,DiffCandP0);
-        
+
         //if(NdotNj == 0.000000){
         //  continue;
         //}
-        
+
         lambda[i]=(float) DiffShiftDotNj / NdotNj;
-        
+
 
         v.x = Tpo->val[0] + lambda[i] * Tn->val[0];
         v.y = Tpo->val[1] + lambda[i] * Tn->val[1];
@@ -228,12 +238,12 @@ int ComputeIntersection(iftMatrix *Tpo, iftImage *img, iftMatrix *Tn, iftVolumeF
         }
       }
     }
-    
+
     iftDestroyMatrix(&Nj);
     iftDestroyMatrix(&DiffCandP0);
 
 
-    if ((p1->x != -1) && (pn->x != -1))   
+    if ((p1->x != -1) && (pn->x != -1))
       return 1;
     else
       return 0;
@@ -367,7 +377,7 @@ iftVolumeFaces* createVF(iftImage* I)
 void DestroyVF(iftVolumeFaces *vf)
 {
     int i;
-    
+
     for (i = 0; i < 6; i++)
     {
         iftDestroyMatrix(&vf[i].orthogonal);
@@ -408,7 +418,7 @@ iftImage *MaximumIntensityProjection(iftImage *img, float xtheta, float ytheta)
     int p=0;
     int Nu, Nv;
     iftVoxel p1, pn;
-    
+
     iftVolumeFaces* volumeFaces;
     iftMatrix *Mtemp, *T;
     iftMatrix *Norigin, *Tnorigin;
@@ -437,7 +447,7 @@ iftImage *MaximumIntensityProjection(iftImage *img, float xtheta, float ytheta)
         iftMatrixElem(Mtemp, 0, 2) = diagonal/2;
 
 
-        
+
         Tpo = iftMultMatrices(T, Mtemp);
 
         if (ComputeIntersection(Tpo, img, Tnorigin, volumeFaces, &p1, &pn))
@@ -446,7 +456,7 @@ iftImage *MaximumIntensityProjection(iftImage *img, float xtheta, float ytheta)
 
             output->val[p] = maxIntensity;
         }
-        
+
 
         iftDestroyMatrix(&Mtemp);
         iftDestroyMatrix(&Tpo);
@@ -474,7 +484,7 @@ int main(int argc, char *argv[])
     //tz = atof(argv[5]);
     char *imgFileName = iftCopyString(argv[1]);
     iftImage *img = iftReadImageByExt(imgFileName);
-  
+
     iftImage *output = NULL;
 
     output = MaximumIntensityProjection(img, tx, ty);
