@@ -1,33 +1,64 @@
 #include <stdio.h>
+#include <math.h>
 #include "ift.h"
+
+#define  NUM_NORMALS    65161
 
 #define GetXCoord(s,p) (((p) % (((s)->xsize)*((s)->ysize))) % (s)->xsize)
 #define GetYCoord(s,p) (((p) % (((s)->xsize)*((s)->ysize))) / (s)->xsize)
 #define GetZCoord(s,p) ((p) / (((s)->xsize)*((s)->ysize)))
 
+
 #define ROUND(x) ((x < 0)?(int)(x-0.5):(int)(x+0.5))
 #define GetVoxelIndex(s,v) ((v.x)+(s)->tby[(v.y)]+(s)->tbz[(v.z)])
 
-
 int RADIUS_THRESHOLD=2;
+int maxDist=164;
+
+typedef struct phong_model {
+  float      ka;
+  float      kd;
+  float      ks;
+  float      ns;
+  int        ndists;
+  iftVector *normal;
+  float     *dephBuffer;
+} PhongModel;
 
 
-int VoxelValue(iftImage *img, iftVoxel v)
+typedef struct volume
 {
-    return img->val[GetVoxelIndex(img, v)];
-}
+    iftMatrix* normal;
+    iftMatrix* center;
+}iftVolumeFaces;
+
+typedef struct object_attr {
+  float opacity;
+  float green;
+  float red;
+  float blue;
+  char visibility;
+} ObjectAttributes;
+
+typedef struct gc {
+  ObjectAttributes *object;
+  int               numberOfObjects;
+  PhongModel       *phong;
+  iftMatrix        *Tinv;
+  iftVector        vDir;
+  iftImage         *tde;
+  iftImage         *scene;
+  iftImage         *label;
+  iftVolumeFaces   *faces;
+  iftImage         *normal;
+} GraphicalContext;
+
 
 int sign( int x ){
     if(x >= 0)
         return 1;
     return -1;
 }
-
-typedef struct volume
-{
-    iftMatrix* orthogonal;
-    iftMatrix* center;
-}iftVolumeFaces;
 
 int isValidPoint(iftImage *img, iftVoxel u)
 {
@@ -41,65 +72,67 @@ int isValidPoint(iftImage *img, iftVoxel u)
     }
 }
 
-float MatrixInnerProduct(iftMatrix *A, iftMatrix *B)
+
+int diagonalSize(iftImage *img)
 {
-  float result = 0;
-
-  for (int i = 0; i < A->ncols; i++)
-    result += (A->val[i] * B->val[i]);
-
-  return result;
+    return ROUND(sqrt((double) (img->xsize * img->xsize) + (img->ysize * img->ysize) + (img->zsize * img->zsize)));
 }
 
-iftVoxel GetVoxelCoord(iftImage *img, int p)
+float PhongShading(GraphicalContext *gc, int p, iftVector N, float dist)
 {
-    iftVoxel u;
+    float cos_,arcos;
+    float cos_2, aux, phong_val = 0.0;
+    float threshold=1E-05;
 
-    u.x = GetXCoord(img, p);
-    u.y = GetYCoord(img, p);
-    u.z = GetZCoord(img, p);
 
-    return u;
+    cos_  =   iftVectorInnerProduct(gc->vDir, N);
+
+    arcos = acos(cos_);
+    if (arcos <= PI/2 && arcos > 0)
+    {
+        cos_2 = 2 * cos_ * cos_ - 1;
+
+        if (arcos <= PI/4 && arcos > 0){
+          aux = 1.;
+          for (int k = 0; k < gc->phong->ns; k++)
+              aux = aux * cos_2;
+
+        }
+
+        else
+        {
+          aux = 0.;
+        }
+
+        phong_val = gc->phong->ka + gc->phong->dephBuffer[(int)dist] * (gc->phong->kd * cos_ + gc->phong->ks * aux);
+    }
+
+    return phong_val;
 }
 
-/* this function creas the rotation/translation matrix for the given theta */
-iftMatrix *createTransformationMatrix(iftImage *img, int xtheta, int ytheta)
+
+
+
+float DDA(GraphicalContext* gc, iftMatrix* Tp0, iftVector p1, iftVector pn)
 {
-    iftMatrix *resMatrix = NULL;
-
-    iftVector v1 = {.x = (float)img->xsize / 2.0, .y = (float)img->ysize / 2.0, .z = (float)img->zsize / 2.0};
-    iftMatrix *transMatrix1 = iftTranslationMatrix(v1);
-
-    iftMatrix *xRotMatrix = iftRotationMatrix(IFT_AXIS_X, -xtheta);
-    iftMatrix *yRotMatrix = iftRotationMatrix(IFT_AXIS_Y, -ytheta);
-
-    float D = sqrt(img->xsize*img->xsize + img->ysize*img->ysize);
-    iftVector v2 = {.x = -(D / 2.0), .y = -(D / 2.0), .z = -(D / 2.0)};
-    iftMatrix *transMatrix2 = iftTranslationMatrix(v2);
-
-
-    resMatrix = iftMultMatricesChain(4, transMatrix1, xRotMatrix,yRotMatrix, transMatrix2);
-
-    return resMatrix;
-}
-
-int DDA(iftImage *img, iftVoxel p1, iftVoxel pn)
-{
-    int n, k;
-    //iftVoxel p;
-    iftVoxel p;
-    float J=0, max=0;
+    int n, k, idx;
+    iftVoxel v;
+    iftVector p;
+    float max=0,J=0.0;
     int Dx,Dy,Dz;
-    float dx=0,dy=0,dz=0;
-    //iftCreateMatrix* J;
+    float dx=0, dy=0, dz=0, phong_val, dist;
+    iftVector N;
 
+    //*red = *green = *blue = 0.0;
 
-    if (p1.x == pn.x && p1.y == pn.y && p1.z == pn.z)
+    if (p1.x == pn.x && p1.y == pn.y && p1.z == pn.z){
         n=1;
+    }
     else{
         Dx=pn.x - p1.x;
         Dy=pn.y - p1.y;
         Dz=pn.z - p1.z;
+
 
         if( abs(Dx) >= abs(Dy) && abs(Dx) >= abs(Dz) ){
             n = abs(Dx)+1;
@@ -125,42 +158,450 @@ int DDA(iftImage *img, iftVoxel p1, iftVoxel pn)
     p.y = p1.y;
     p.z = p1.z;
 
-    int validP=0;
+
+    //int validP=0;
     for (k = 1; k < n; k++)
     {
-        //printf("debug\n");
-        //J+=  (float)LinearInterpolationValue(img, px, py);
-        //J+=  iftImgVal2D(img, (int)px, (int)py);
+        v.x=(int)p.x;
+        v.y=(int)p.y;
+        v.z=(int)p.z;
 
-        if (isValidPoint(img,p)){
+        idx = iftGetVoxelIndex(gc->scene, v);
 
+        if (gc->label->val[idx] != 0)
+        {
+            if (gc->object[gc->label->val[idx]].visibility != 0)
+            {
+                //return 1.;
+                dist =sqrtf((p.x-Tp0->val[0])*(p.x-Tp0->val[0])+(p.y-Tp0->val[1])*(p.y-Tp0->val[1])+(p.z-Tp0->val[2])*(p.z-Tp0->val[2]));
 
-          //J= iftImgVal(img,p.x,p.y,p.z);
-
-          iftPoint aux;
-          aux.x = p.x;
-          aux.y = p.y;
-          aux.z = p.z;
-          max = iftImageValueAtPoint(img,aux);
-          break;
-
-          // pegando o ponto com interpolacao
-          J= iftImageValueAtPoint(img,aux);
-
-          if (J>max)
-            max=J;
-          validP++;
+                N.x  = -gc->phong->normal[gc->normal->val[idx]].x;
+                N.y  = -gc->phong->normal[gc->normal->val[idx]].y;
+                N.z  = -gc->phong->normal[gc->normal->val[idx]].z;
+                phong_val = PhongShading(gc, idx, N, dist);
+                J += (float) phong_val;
+                break;
+            }
         }
 
         p.x = p.x + dx;
         p.y = p.y + dy;
         p.z = p.z + dz;
     }
+    if (J > 1) J = 1;
+    if (J < 0) J = 0;
 
-    return (int)max;
+
+    return J;
+}
+
+iftVector *createNormalTable()
+{
+    int        i, gamma, alpha;
+    float      gamma_rad, alpha_rad;
+    iftVector *normaltable;
+
+    /* creates normal look-up table */
+
+    normaltable = (iftVector *)calloc(NUM_OF_NORMALS, sizeof(iftVector));
+
+    normaltable[0].x = 0.0;
+    normaltable[0].y = 0.0;
+    normaltable[0].z = 0.0;
+
+    i = 1;
+    for (gamma = -90; gamma <= 90; gamma++)
+    {
+        gamma_rad = (PI * gamma) / 180.0;
+        for (alpha = 0; alpha < 360; alpha++)
+        {
+            alpha_rad = (PI * alpha) / 180.0;
+            normaltable[i].x = cos(gamma_rad) * cos(alpha_rad);
+            normaltable[i].y = cos(gamma_rad) * sin(alpha_rad);
+            normaltable[i].z = sin(gamma_rad);
+            i++;
+        }
+    }
+
+    return (normaltable);
+}
+
+PhongModel *createPhongModel(iftImage *scene)
+{
+    PhongModel *phong = (PhongModel *) malloc(sizeof(PhongModel) * 6);
+
+    // Phong constantss
+    phong->ka     = 0.1;
+    phong->kd     = 0.7;
+    phong->ks     = 0.2;
+    phong->ns     = 5.0;
+    phong->normal = createNormalTable();
+    phong->ndists = (int)(maxDist);
+    phong->dephBuffer  = (float *) malloc(phong->ndists*sizeof(float));
+    for (int d = 0; d < phong->ndists; d++){
+        phong->dephBuffer[d] = (float)  d / (float)phong->ndists;
+    }
+
+    return (phong);
+}
+
+int MaximumValue(iftImage *img)
+{
+    int p, Imax = -999999999;
+
+    for (p = 0; p < img->n; p++)
+        if (img->val[p] > Imax)
+            Imax = img->val[p];
+
+    return Imax;
+}
+
+ObjectAttributes *createObjectAttr(iftImage *label, int *numberOfObjects)
+{
+    ObjectAttributes *object;
+    *numberOfObjects = MaximumValue(label);
+
+
+    //object = (ObjectAttributes *)calloc(*numberOfObjects + 1, sizeof(ObjectAttributes));
+    object = (ObjectAttributes *)calloc(*numberOfObjects + 1, sizeof(ObjectAttributes));
+
+    object[0].opacity    = 0;
+    object[0].red        = 0;
+    object[0].green      = 0;
+    object[0].blue       = 0;
+    object[0].visibility = 0;
+
+    /* default for objects */
+
+    for (int i = 1; i <= *numberOfObjects; i++)
+    {
+        object[i].opacity    = 1;
+        object[i].red        = 1;
+        object[i].green      = 1;
+        object[i].blue       = 1;
+        object[i].visibility = 1;
+    }
+
+    return (object);
+}
+
+iftVolumeFaces* createVF(GraphicalContext* gc){
+    iftImage *scene = gc->scene;
+    int Nx = scene->xsize;
+    int Ny = scene->ysize;
+    int Nz = scene->zsize;
+
+    iftVolumeFaces *vf = (iftVolumeFaces *) malloc(sizeof(iftVolumeFaces) * 6);
+
+    for (int i = 0; i < 6; i++)
+    {
+        vf[i].normal = iftCreateMatrix(1, 4);
+        vf[i].center = iftCreateMatrix(1, 4);
+    }
+
+     // Face of Plane XY
+  vf[0].normal->val[0] = 0;
+  vf[0].normal->val[1] = 0;
+  vf[0].normal->val[2] = -1;
+  vf[0].normal->val[3] = 1;
+
+  vf[0].center->val[0] = Nx / 2;
+  vf[0].center->val[1] = Ny / 2;
+  vf[0].center->val[2] = 0;
+  vf[0].center->val[3] = 1;
+
+  // Face of Plane XZ
+  vf[1].normal->val[0] = 0;
+  vf[1].normal->val[1] = -1;
+  vf[1].normal->val[2] = 0;
+  vf[1].normal->val[3] = 1;
+
+  vf[1].center->val[0] = Nx / 2;
+  vf[1].center->val[1] = 0;
+  vf[1].center->val[2] = Nz / 2;
+  vf[1].center->val[3] = 1;
+
+  // Face of Plane YZ
+  vf[2].normal->val[0] = -1;
+  vf[2].normal->val[1] = 0;
+  vf[2].normal->val[2] = 0;
+  vf[2].normal->val[3] = 1;
+
+  vf[2].center->val[0] = 0;
+  vf[2].center->val[1] = Ny / 2;
+  vf[2].center->val[2] = Nz / 2;
+  vf[2].center->val[3] = 1;
+
+  // Face of Opposite Plane XY
+  vf[3].normal->val[0] = 0;
+  vf[3].normal->val[1] = 0;
+  vf[3].normal->val[2] = 1;
+  vf[3].normal->val[3] = 1;
+
+  vf[3].center->val[0] = Nx / 2;
+  vf[3].center->val[1] = Ny / 2;
+  vf[3].center->val[2] = Nz - 1;
+  vf[3].center->val[3] = 1;
+
+  // Face of Opposite Plane XZ
+  vf[4].normal->val[0] = 0;
+  vf[4].normal->val[1] = 1;
+  vf[4].normal->val[2] = 0;
+  vf[4].normal->val[3] = 1;
+
+  vf[4].center->val[0] = Nx / 2;
+  vf[4].center->val[1] = Ny - 1;
+  vf[4].center->val[2] = Nz / 2;
+  vf[4].center->val[3] = 1;
+
+  // Face of Opposite Plane YZ
+  vf[5].normal->val[0] = 1;
+  vf[5].normal->val[1] = 0;
+  vf[5].normal->val[2] = 0;
+  vf[5].normal->val[3] = 1;
+
+  vf[5].center->val[0] = Nx-1;
+  vf[5].center->val[1] = Ny / 2;
+  vf[5].center->val[2] = Nz / 2;
+  vf[5].center->val[3] = 1;
+
+  return vf;
+
+}
+
+int GetNormalIndex(iftVector N)
+{
+
+    int gamma, alpha, idx;
+
+    if ((N.x == 0.0) && (N.y == 0.0) && (N.z == 0.0))
+    {
+        return (0);
+    }
+
+    gamma = (int)(asin(N.z) * 180.0 / PI);
+    alpha = (int)(atan2(N.y, N.x) * 180.0 / PI);
+    if (alpha < 0)
+        alpha += 360;
+    idx = ((gamma + 90) * 360) + alpha + 1;
+
+    return idx;
+}
+
+void computeSceneNormal(GraphicalContext* gc)
+{
+    iftImage   *borders;
+    iftAdjRel  *A;
+
+    float      diff;
+    int        i, p, q, idx;
+    iftVoxel   u, v;
+    iftVector  N;
+    gc->normal = iftCreateImage(gc->scene->xsize, gc->scene->ysize, gc->scene->zsize);
+    A   = iftSpheric(3.0);
+    float      *mag = (float *) malloc(A->n*sizeof(float));
+    for (i = 0; i < A->n; i++)
+        mag[i] = sqrtf(A->dx[i] * A->dx[i] + A->dy[i] * A->dy[i] + A->dz[i] * A->dz[i]);
+
+    for (u.z = 0; u.z < gc->scene->zsize; u.z++)
+        for (u.y = 0; u.y < gc->scene->ysize; u.y++)
+            for (u.x = 0; u.x < gc->scene->xsize; u.x++)
+            {
+                  p = iftGetVoxelIndex(gc->scene, u);
+                  if (gc->label->val[p] != 0){
+                      N.x = N.y = N.z = 0.0;
+
+                      for (i = 1; i < A->n; i++)
+                      {
+                          v = iftGetAdjacentVoxel(A, u ,i);
+
+                          if (isValidPoint(gc->scene, v))
+                          {
+                              q = iftGetVoxelIndex(gc->scene, v);
+
+                              diff = gc->scene->val[q] - gc->scene->val[p];
+
+                              N.x  += diff * A->dx[i] / mag[i];
+                              N.y  += diff * A->dy[i] / mag[i];
+                              N.z  += diff * A->dz[i] / mag[i];
+                          }
+                      }
+                      N = iftNormalizeVector(N);
+
+                      N.x = -N.x; N.y = -N.y; N.z = -N.z;
+                      gc->normal->val[p] = GetNormalIndex(N);
+                  }
+            }
+
+    free(mag);
+    iftDestroyAdjRel(&A);
+}
+
+void computeNormals(GraphicalContext* gc)
+{
+    iftImage   *borders;
+    iftAdjRel  *A   = iftSpheric(3.0);
+    float      *mag = (float *) malloc(A->n*sizeof(float));
+    float      diff;
+    int        i, p, q, idx;
+    iftVoxel   u, v;
+    iftVector  N;
+
+    // img borders
+    borders    = iftObjectBorders(gc->label, A);
+
+    gc->normal = iftCreateImage(gc->label->xsize, gc->label->ysize, gc->label->zsize);
+    A   = iftSpheric(5.0);
+    for (i = 0; i < A->n; i++)
+        mag[i] = sqrtf(A->dx[i] * A->dx[i] + A->dy[i] * A->dy[i] + A->dz[i] * A->dz[i]);
+
+    for (int p=0; p < borders->n; p++)
+    {
+
+        if (borders->val[p] != 0){
+            u = iftGetVoxelCoord(gc->tde, p);
+            if (gc->label->val[p] != 0){
+                N.x = N.y = N.z = 0.0;
+
+                for (i = 1; i < A->n; i++)
+                {
+                    v = iftGetAdjacentVoxel(A, u ,i);
+
+                    if (isValidPoint(borders, v))
+                    {
+                        q = iftGetVoxelIndex(borders, v);
+
+                        diff = gc->tde->val[q] - borders->val[p];
+
+                        N.x  += diff * A->dx[i] / mag[i];
+                        N.y  += diff * A->dy[i] / mag[i];
+                        N.z  += diff * A->dz[i] / mag[i];
+                    }
+                }
+                N = iftNormalizeVector(N);
+
+                N.x = -N.x; N.y = -N.y; N.z = -N.z;
+                gc->normal->val[p] = GetNormalIndex(N);
+           }
+        }
+    }
+
+
+    free(mag);
+    iftDestroyAdjRel(&A);
 }
 
 
+iftSet *ObjectBorders(iftImage *label)
+{
+  iftAdjRel *A;
+  iftSet    *B=NULL;
+
+    A = iftSpheric(1.0);
+
+  for (int p=0; p < label->n; p++) {
+    if (label->val[p] != 0){ // p is an object voxel
+      iftVoxel u = iftGetVoxelCoord(label,p);
+
+      for (int i=1; i < A->n; i++) {
+        iftVoxel v = iftGetAdjacentVoxel(A,u,i);
+        if (iftValidVoxel(label,v)){
+          int q = iftGetVoxelIndex(label,v);
+          if (label->val[q]!=label->val[p]){ // q belongs to another
+                     // object/background,
+                     // then p is border
+            iftInsertSet(&B,p);
+            break;
+          }
+         }else{ // p is at the border of the image, then it is border
+           iftInsertSet(&B,p);
+         break;
+       }
+      }
+    }
+  }
+
+  iftDestroyAdjRel(&A);
+  return B;
+}
+
+
+void computeTDE(GraphicalContext *gc)
+{
+
+  iftAdjRel *A = iftSpheric(1.0);
+  iftSet    *B=ObjectBorders(gc->label);
+  iftImage  *tde, *root;
+  iftGQueue *Q;
+
+  tde    = iftCreateImage(gc->label->xsize, gc->label->ysize, gc->label->zsize);
+  root   = iftCreateImage(gc->label->xsize, gc->label->ysize, gc->label->zsize);
+  Q      = iftCreateGQueue(IFT_QSIZE, tde->n, tde->val);
+
+  for (int p=0; p < gc->label->n; p++)
+    if (gc->label->val[p]!=0)
+      tde->val[p] = IFT_INFINITY_INT;
+
+  while (B != NULL)
+  {
+    int p           = iftRemoveSet(&B);
+    root->val[p]    = p;
+    tde->val[p]     = 0;
+    iftInsertGQueue(&Q, p);
+  }
+
+  gc->tde=tde;
+
+  iftDestroyAdjRel(&A);
+  iftDestroyGQueue(&Q);
+  iftDestroyImage(&root);
+}
+
+GraphicalContext *createGC(iftImage *scene, iftImage *imageLabel, float tilt, float spin)
+{
+    GraphicalContext *gc;
+
+    gc = (GraphicalContext *) calloc(1, sizeof(GraphicalContext));
+
+    gc->scene          = iftCopyImage(scene);
+    gc->phong          = createPhongModel(scene);
+
+    gc->numberOfObjects = 0;
+    gc->faces           = createVF(gc);
+
+    // computing transformations
+    iftVector v1 = {.x = gc->scene->xsize / 2.0, .y = gc->scene->ysize / 2.0, .z = gc->scene->zsize / 2.0};
+    iftMatrix *transMatrix1 = iftTranslationMatrix(v1);
+
+    iftMatrix *xRotMatrix = iftRotationMatrix(IFT_AXIS_X, -tilt);
+    iftMatrix *yRotMatrix = iftRotationMatrix(IFT_AXIS_Y, -spin);
+
+    int D = ROUND(sqrt(gc->scene->xsize*gc->scene->xsize + gc->scene->ysize*gc->scene->ysize + gc->scene->zsize*gc->scene->zsize));
+    iftVector v2 = {.x = -(D / 2.0), .y = -(D / 2.0), .z = -(D / 2.0)};
+    iftMatrix *transMatrix2 = iftTranslationMatrix(v2);
+
+    gc->Tinv = iftMultMatricesChain(4, transMatrix1, xRotMatrix,yRotMatrix, transMatrix2);
+    gc->vDir.x = 0; gc->vDir.y = 0; gc->vDir.z = -1;
+    iftMatrix* vec = iftCreateMatrix(1, 4);
+
+    iftMatrixElem(vec, 0, 0) =  0;
+    iftMatrixElem(vec, 0, 1) =  0;
+    iftMatrixElem(vec, 0, 2) = -1;
+    iftMatrixElem(vec, 0, 3) =  0;
+
+    vec   = iftMultMatrices(gc->Tinv, vec);
+
+    gc->vDir.x = iftMatrixElem(vec, 0, 0); gc->vDir.y = iftMatrixElem(vec, 0, 1); gc->vDir.z = iftMatrixElem(vec, 0, 2);
+
+    gc->label       = iftCopyImage(imageLabel);
+    gc->object      = createObjectAttr(imageLabel, &gc->numberOfObjects);
+
+    //computeTDE(gc);
+    computeSceneNormal(gc);
+    //computeNormals(gc);
+
+    return (gc);
+}
 
 
 iftVector columnVectorMatrixToVector(iftMatrix *m)
@@ -174,228 +615,83 @@ iftVector columnVectorMatrixToVector(iftMatrix *m)
 }
 
 
-int ComputeIntersection(iftMatrix *Tpo, iftImage *img, iftMatrix *Tn, iftVolumeFaces *vf, iftVoxel *p1, iftVoxel *pn)
+iftVector columnVectorVoxelToVector(iftVoxel m)
+{
+    iftVector v = {.x = m.x, .y = m.y, .z = m.z};
+    v.x = iftAlmostZero(v.x) ? 0.0 : v.x;
+    v.y = iftAlmostZero(v.y) ? 0.0 : v.y;
+    v.z = iftAlmostZero(v.z) ? 0.0 : v.z;
+
+    return v;
+}
+
+
+int computeIntersection(GraphicalContext* gc, iftMatrix *Tpo, iftMatrix *Tn, iftVector *p1, iftVector *pn)
 {
 
-    float lambda[6] = { -1};
     float max=-9999999.9, min=9999999.9;
     int i;
-    p1->x=pn->x=p1->y=pn->y,p1->z=pn->z=-1;
-    iftMatrix *Nj = iftCreateMatrix(1, 3);
-    iftMatrix *DiffCandP0 = iftCreateMatrix(1, 3);
-    float NdotNj = 0, DiffShiftDotNj = 0;
+    p1->x=pn->x=p1->y=pn->y,p1->z=pn->z=-1.;
+    float lambda, l1=9999999.9, ln=-9999999.9;
+    float innerP = 0, innerPV=0;
+    iftMatrix* Nj = iftCreateMatrix(1,3);
     iftVector v1, v2, v3;
-    iftVoxel v;
-
+    iftMatrix *V = iftCreateMatrix(1, 3);
+    iftVector P;
 
     for (i = 0; i < 6; i++) {
-      iftMatrixElem(Nj, 0, 0) = vf[i].orthogonal->val[0];
-      iftMatrixElem(Nj, 0, 1) = vf[i].orthogonal->val[1];
-      iftMatrixElem(Nj, 0, 2) = vf[i].orthogonal->val[2];
-      v1 = columnVectorMatrixToVector(Nj);
-      v2 = columnVectorMatrixToVector(Tn);
+        iftMatrixElem(Nj, 0, 0) = gc->faces[i].normal->val[0];
+        iftMatrixElem(Nj, 0, 1) = gc->faces[i].normal->val[1];
+        iftMatrixElem(Nj, 0, 2) = gc->faces[i].normal->val[2];
+        v1 = columnVectorMatrixToVector(Nj);
+        v2 = columnVectorMatrixToVector(Tn);
+        innerP = iftVectorInnerProduct(v1,v2);
 
-      NdotNj = iftVectorInnerProduct(v1,v2);
-
-      //NdotNj = MatrixInnerProduct(Tn,Nj);
-
-      if (NdotNj != 0){
-
-        iftMatrixElem(DiffCandP0, 0, 0) = vf[i].center->val[0] - Tpo->val[0];
-        iftMatrixElem(DiffCandP0, 0, 1) = vf[i].center->val[1] - Tpo->val[1];
-        iftMatrixElem(DiffCandP0, 0, 2) = vf[i].center->val[2] - Tpo->val[2];
-
-        v3 = columnVectorMatrixToVector(DiffCandP0);
-
-        DiffShiftDotNj = iftVectorInnerProduct(v1,v3);
-        //DiffShiftDotNj = MatrixInnerProduct(Nj,DiffCandP0);
-
-        //if(NdotNj == 0.000000){
-        //  continue;
-        //}
-
-        lambda[i]=(float) DiffShiftDotNj / NdotNj;
-
-
-        v.x = Tpo->val[0] + lambda[i] * Tn->val[0];
-        v.y = Tpo->val[1] + lambda[i] * Tn->val[1];
-        v.z = Tpo->val[2] + lambda[i] * Tn->val[2];
-
-        if (isValidPoint(img, v))
+        if (innerP != 0)
         {
-          if (lambda[i] < min){
-              p1->x = v.x;
-              p1->y = v.y;
-              p1->z = v.z;
-              min = lambda[i];
-          }
-          if (lambda[i] > max) {
-              pn->x = v.x;
-              pn->y = v.y;
-              pn->z = v.z;
-              max = lambda[i];
-          }
+            iftMatrixElem(V, 0, 0)     = gc->faces[i].center->val[0] - Tpo->val[0];
+            iftMatrixElem(V, 0, 1)     = gc->faces[i].center->val[1] - Tpo->val[1];
+            iftMatrixElem(V, 0, 2)     = gc->faces[i].center->val[2] - Tpo->val[2];
+
+            v3 = columnVectorMatrixToVector(V);
+            innerPV = iftVectorInnerProduct(v1, v3);
+            lambda= (float) innerPV / innerP;
+            //printf("%f\n", lambda);
+
+            P.x = Tpo->val[0] + lambda * Tn->val[0];
+            P.y = Tpo->val[1] + lambda * Tn->val[1];
+            P.z = Tpo->val[2] + lambda * Tn->val[2];
+            iftVoxel test;
+            test.x = (int)P.x;
+            test.y = (int)P.y;
+            test.z = (int)P.z;
+            if (isValidPoint(gc->scene, test))
+            {
+                if (lambda < min){
+                    p1->x = P.x;
+                    p1->y = P.y;
+                    p1->z = P.z;
+                    min = lambda;
+                }
+                if (lambda > max) {
+                    pn->x = P.x;
+                    pn->y = P.y;
+                    pn->z = P.z;
+                    max = lambda;
+                }
+            }
         }
-      }
     }
-
     iftDestroyMatrix(&Nj);
-    iftDestroyMatrix(&DiffCandP0);
+    iftDestroyMatrix(&V);
 
-
-    if ((p1->x != -1) && (pn->x != -1))
-      return 1;
-    else
-      return 0;
-}
-
-
-
-int LinearInterpolationValue(iftImage *img, float x, float y, float z)
-{
-    iftVoxel u[8];
-    float dx = 1.0;
-    float dy = 1.0;
-    float dz = 1.0;
-    float  P12, P34, P56, P78;
-    float aux1, aux2;
-    int Pi;
-
-    if ((int) (x + 1.0) == img->xsize)
-        dx = 0.0;
-    if ((int) (y + 1.0) == img->ysize)
-        dy = 0.0;
-    if ((int) (z + 1.0) == img->zsize)
-        dz = 0.0;
-
-    //closest neighbour in each direction
-    u[0].x = (int)x;        u[0].y = (int)y;          u[0].z = (int)z;
-    u[1].x = (int)(x + dx); u[1].y = (int)y;          u[1].z = (int)z;
-    u[2].x = (int)x;        u[2].y = (int)(y + dy);   u[2].z = (int)z;
-    u[3].x = (int)(x + dx); u[3].y = (int)(y + dy);   u[3].z = (int)z;
-    u[4].x = (int)x;        u[4].y = (int)y;          u[4].z = (int)(z + dz);
-    u[5].x = (int)(x + dx); u[5].y = (int)y;          u[5].z = (int)(z + dz);
-    u[6].x = (int)x;        u[6].y = (int)(y + dy);   u[6].z = (int)(z + dz);
-    u[7].x = (int)(x + dx); u[7].y = (int)(y + dy);   u[7].z = (int)(z + dz);
-
-
-    P12 = (float)iftImgVal2D(img,u[1].x,u[1].y) * (x - u[0].x) + (float)iftImgVal2D(img,u[0].x,u[0].y) * (u[1].x - x);
-    P34 = (float)iftImgVal2D(img,u[3].x,u[3].y) * (x - u[2].x) + (float)iftImgVal2D(img,u[2].x,u[2].y) * (u[3].x - x);
-    P56 = (float)iftImgVal2D(img,u[5].x,u[5].y) * (x - u[4].x) + (float)iftImgVal2D(img,u[4].x,u[4].y) * (u[5].x - x);
-    P78 = (float)iftImgVal2D(img,u[7].x,u[7].y) * (x - u[6].x) + (float)iftImgVal2D(img,u[6].x,u[6].y) * (u[7].x - x);
-    aux1 = P34 *  (y - u[0].y) + P12 * (u[2].y - y);
-    aux2 = P56 * (y - u[0].y) + P78 * (u[2].y - y);
-    Pi  = (int)aux2 * (z - u[0].z) + aux1 * (u[4].z - z);
-
-    return Pi;
-}
-
-iftVolumeFaces* createVF(iftImage* I)
-{
-  int Nx = I->xsize;
-  int Ny = I->ysize;
-  int Nz = I->zsize;
-  int i;
-
-  iftVolumeFaces *vf = (iftVolumeFaces *) malloc(sizeof(iftVolumeFaces) * 6);
-
-  for (i = 0; i < 6; i++)
-  {
-      vf[i].orthogonal = iftCreateMatrix(1, 4);
-      vf[i].center = iftCreateMatrix(1, 4);
-  }
-
-  // Face of Plane XY
-  vf[0].orthogonal->val[0] = 0;
-  vf[0].orthogonal->val[1] = 0;
-  vf[0].orthogonal->val[2] = -1;
-  vf[0].orthogonal->val[3] = 1;
-
-  vf[0].center->val[0] = Nx / 2;
-  vf[0].center->val[1] = Ny / 2;
-  vf[0].center->val[2] = 0;
-  vf[0].center->val[3] = 1;
-
-  // Face of Plane XZ
-  vf[1].orthogonal->val[0] = 0;
-  vf[1].orthogonal->val[1] = -1;
-  vf[1].orthogonal->val[2] = 0;
-  vf[1].orthogonal->val[3] = 1;
-
-  vf[1].center->val[0] = Nx / 2;
-  vf[1].center->val[1] = 0;
-  vf[1].center->val[2] = Nz / 2;
-  vf[1].center->val[3] = 1;
-
-  // Face of Plane YZ
-  vf[2].orthogonal->val[0] = -1;
-  vf[2].orthogonal->val[1] = 0;
-  vf[2].orthogonal->val[2] = 0;
-  vf[2].orthogonal->val[3] = 1;
-
-  vf[2].center->val[0] = 0;
-  vf[2].center->val[1] = Ny / 2;
-  vf[2].center->val[2] = Nz / 2;
-  vf[2].center->val[3] = 1;
-
-  // Face of Opposite Plane XY
-  vf[3].orthogonal->val[0] = 0;
-  vf[3].orthogonal->val[1] = 0;
-  vf[3].orthogonal->val[2] = 1;
-  vf[3].orthogonal->val[3] = 1;
-
-  vf[3].center->val[0] = Nx / 2;
-  vf[3].center->val[1] = Ny / 2;
-  vf[3].center->val[2] = Nz - 1;
-  vf[3].center->val[3] = 1;
-
-  // Face of Opposite Plane XZ
-  vf[4].orthogonal->val[0] = 0;
-  vf[4].orthogonal->val[1] = 1;
-  vf[4].orthogonal->val[2] = 0;
-  vf[4].orthogonal->val[3] = 1;
-
-  vf[4].center->val[0] = Nx / 2;
-  vf[4].center->val[1] = Ny - 1;
-  vf[4].center->val[2] = Nz / 2;
-  vf[4].center->val[3] = 1;
-
-  // Face of Opposite Plane YZ
-  vf[5].orthogonal->val[0] = 1;
-  vf[5].orthogonal->val[1] = 0;
-  vf[5].orthogonal->val[2] = 0;
-  vf[5].orthogonal->val[3] = 1;
-
-  vf[5].center->val[0] = Nx-1;
-  vf[5].center->val[1] = Ny / 2;
-  vf[5].center->val[2] = Nz / 2;
-  vf[5].center->val[3] = 1;
-
-  return vf;
-}
-
-void DestroyVF(iftVolumeFaces *vf)
-{
-    int i;
-
-    for (i = 0; i < 6; i++)
-    {
-        iftDestroyMatrix(&vf[i].orthogonal);
-        iftDestroyMatrix(&vf[i].center);
+    if ((p1->x != -1) && (pn->x != -1) && (min<max)){
+        return 1;
     }
-    free(vf);
-}
+    else
+        return 0;
 
 
-iftMatrix *voxelToMatrix(iftVoxel v)
-{
-    iftMatrix *voxMat = iftCreateMatrix(1, 4);
-    iftMatrixElem(voxMat, 0, 0) = v.x;
-    iftMatrixElem(voxMat, 0, 1) = v.y;
-    iftMatrixElem(voxMat, 0, 2) = v.z;
-    iftMatrixElem(voxMat, 0, 3) = 1;
-
-    return voxMat;
 }
 
 iftMatrix *imagePixelToMatrix(iftImage *img, int p)
@@ -410,85 +706,75 @@ iftMatrix *imagePixelToMatrix(iftImage *img, int p)
 }
 
 
-
-iftImage *MaximumIntensityProjection(iftImage *img, float xtheta, float ytheta)
+iftImage* CurvLinearClipping(GraphicalContext *gc)
 {
+
     float diagonal = 0;
-    double maxIntensity;
-    int p=0;
-    int Nu, Nv;
-    iftVoxel p1, pn;
+    iftImage *outputImage = NULL;
+    float intensity;
 
-    iftVolumeFaces* volumeFaces;
-    iftMatrix *Mtemp, *T;
-    iftMatrix *Norigin, *Tnorigin;
-    iftMatrix *Tpo;
+    iftMatrix *Mtemp,*Tpo;
+    iftVector p1, pn;
+    iftColor  RGB, YCbCr;
 
-    diagonal = sqrt((img->xsize * img->xsize) + (img->ysize * img->ysize) + (img->zsize * img->zsize));
-    Nu = Nv = diagonal;
-    iftImage *output = iftCreateImage(Nu, Nv, 1);
-    T  = createTransformationMatrix(img, xtheta, ytheta);
-    //iftPrintMatrix(T);
 
-    Norigin =  iftCreateMatrix(1, 4);
-    iftMatrixElem(Norigin, 0, 0) = 0;
-    iftMatrixElem(Norigin, 0, 1) = 0;
-    iftMatrixElem(Norigin, 0, 2) = -1;
-    iftMatrixElem(Norigin, 0, 3) = 0;
-    //iftPrintMatrix(Norigin);
+    iftMatrix* vec = iftCreateMatrix(1, 4);
 
-    Tnorigin = iftMultMatrices(T, Norigin);
+    iftMatrixElem(vec, 0, 0) =  0;
+    iftMatrixElem(vec, 0, 1) =  0;
+    iftMatrixElem(vec, 0, 2) = -1;
+    iftMatrixElem(vec, 0, 3) = 0;
 
-    volumeFaces = createVF(img);
+    iftMatrix* tVec = iftMultMatrices(gc->Tinv, vec);
+    diagonal = sqrt((gc->scene->xsize * gc->scene->xsize) + (gc->scene->ysize * gc->scene->ysize) + (gc->scene->zsize * gc->scene->zsize));
+    outputImage = iftCreateImage(diagonal, diagonal, 1);
 
-    for (p = 0; p < output->n; p++)
+    for (int p = 0; p < outputImage->n; p++)
     {
-        Mtemp = imagePixelToMatrix(output,p);
+        //printf("Step : %d\n", p);
+        float     r = 0.0, g = 0.0, b = 0.0;
+        Mtemp = imagePixelToMatrix(outputImage,p);
         iftMatrixElem(Mtemp, 0, 2) = diagonal/2;
 
+        Tpo =  iftMultMatrices(gc->Tinv, Mtemp);
 
-
-        Tpo = iftMultMatrices(T, Mtemp);
-
-        if (ComputeIntersection(Tpo, img, Tnorigin, volumeFaces, &p1, &pn))
+        if (computeIntersection(gc, Tpo, tVec, &p1, &pn))
         {
-            maxIntensity  = DDA(img,p1,pn);
-
-            output->val[p] = maxIntensity;
+            intensity = DDA(gc, Tpo, p1, pn);
+            outputImage->val[p] = (int)(255.0 * intensity);
         }
-
 
         iftDestroyMatrix(&Mtemp);
         iftDestroyMatrix(&Tpo);
     }
 
-    iftDestroyMatrix(&T);
-    iftDestroyMatrix(&Norigin);
-    iftDestroyMatrix(&Tnorigin);
-    DestroyVF(volumeFaces);
-
-    return output;
+    return outputImage;
 }
 
 
 int main(int argc, char *argv[])
 {
-    //if (argc != 6)
-    //    Error("Run: ./main <filename> <output> <xtheta> <ytheta> , "main");
-
     char buffer[512];
 
-    float tx, ty;
-    tx = atof(argv[3]);
-    ty = atof(argv[4]);
-    //tz = atof(argv[5]);
+    float tilt, spin;
+    GraphicalContext *gc;
     char *imgFileName = iftCopyString(argv[1]);
-    iftImage *img = iftReadImageByExt(imgFileName);
-
+    char *imgLabelFileName = iftCopyString(argv[2]);
     iftImage *output = NULL;
 
-    output = MaximumIntensityProjection(img, tx, ty);
-    sprintf(buffer, "data/%.1f%.1f%s", tx, ty, argv[2]);
+
+    iftImage *img = iftReadImageByExt(imgFileName);
+    iftImage *imgLabel = iftReadImageByExt(imgLabelFileName);
+
+    tilt = atof(argv[3]);
+    spin = atof(argv[4]);
+
+    gc = createGC(img, imgLabel, tilt, spin);
+    output   = CurvLinearClipping(gc);
+    printf("Done\n");
+
+    sprintf(buffer, "data/test3.png");
+
     iftImage *normalizedImage= iftNormalize(output,0,255);
 
     iftWriteImageByExt(normalizedImage, buffer);
