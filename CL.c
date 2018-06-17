@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <math.h>
 #include "ift.h"
+#include "CL.h"
 
 
 int sign( int x ){
@@ -20,41 +21,6 @@ int isValidPoint(iftImage *img, iftVoxel u)
         return 0;
     }
 }
-
-float PhongShading(GraphicalContext *gc, int p, iftVector N, float dist)
-{
-    float cos_,arcos;
-    float cos_2, aux, phong_val = 0.0;
-    float threshold=1E-05;
-
-
-    cos_  =   iftVectorInnerProduct(gc->vDir, N);
-
-    arcos = acos(cos_);
-    if (arcos <= PI/2 && arcos > 0)
-    {
-        cos_2 = 2 * cos_ * cos_ - 1;
-
-        if (arcos <= PI/4 && arcos > 0){
-          aux = 1.;
-          for (int k = 0; k < gc->phong->ns; k++)
-              aux = aux * cos_2;
-
-        }
-
-        else
-        {
-          aux = 0.;
-        }
-
-        phong_val = gc->phong->ka + gc->phong->dephBuffer[(int)dist] * (gc->phong->kd * cos_ + gc->phong->ks * aux);
-    }
-
-    return phong_val;
-}
-
-
-
 
 float DDA(GraphicalContext* gc, iftMatrix* Tp0, iftVector p1, iftVector pn)
 {
@@ -115,16 +81,18 @@ float DDA(GraphicalContext* gc, iftMatrix* Tp0, iftVector p1, iftVector pn)
         {
             if (gc->object[gc->label->val[idx]].visibility != 0)
             {
-                //return 1.;
-                dist =sqrtf((p.x-Tp0->val[0])*(p.x-Tp0->val[0])+(p.y-Tp0->val[1])*(p.y-Tp0->val[1])+(p.z-Tp0->val[2])*(p.z-Tp0->val[2]));
-                
-                if (gc->tde->val[idx] >= 14){
+                if (gc->tde->val[idx] >= 30){
                     // N.x  = -gc->phong->normal[gc->normal->val[idx]].x;
                     // N.y  = -gc->phong->normal[gc->normal->val[idx]].y;
                     // N.z  = -gc->phong->normal[gc->normal->val[idx]].z;
                     // phong_val = PhongShading(gc, idx, N, dist);
                     // J += (float) phong_val;
-                    return 255.;
+                    iftPoint point;
+                    point.x = p.x;
+                    point.y = p.y;
+                    point.z = p.z; 
+
+                    J = (float) iftImageValueAtPoint(gc->scene,point);
                     break;
               }
             }
@@ -134,9 +102,6 @@ float DDA(GraphicalContext* gc, iftMatrix* Tp0, iftVector p1, iftVector pn)
         p.y = p.y + dy;
         p.z = p.z + dz;
     }
-    if (J > 1) J = 1;
-    if (J < 0) J = 0;
-
 
     return J;
 }
@@ -172,24 +137,6 @@ iftVector *createNormalTable()
     return (normaltable);
 }
 
-PhongModel *createPhongModel(iftImage *scene)
-{
-    PhongModel *phong = (PhongModel *) malloc(sizeof(PhongModel) * 6);
-
-    // Phong constantss
-    phong->ka     = 0.1;
-    phong->kd     = 0.7;
-    phong->ks     = 0.2;
-    phong->ns     = 5.0;
-    phong->normal = createNormalTable();
-    phong->ndists = (int)(maxDist);
-    phong->dephBuffer  = (float *) malloc(phong->ndists*sizeof(float));
-    for (int d = 0; d < phong->ndists; d++){
-        phong->dephBuffer[d] = (float)  d / (float)phong->ndists;
-    }
-
-    return (phong);
-}
 
 int MaximumValue(iftImage *img)
 {
@@ -540,8 +487,6 @@ GraphicalContext *createGC(iftImage *scene, iftImage *imageLabel, float tilt, fl
     gc = (GraphicalContext *) calloc(1, sizeof(GraphicalContext));
 
     gc->scene          = iftCopyImage(scene);
-    gc->phong          = createPhongModel(scene);
-
     gc->numberOfObjects = 0;
     gc->faces           = createVF(gc);
 
@@ -719,7 +664,8 @@ iftImage* CurvLinear(GraphicalContext *gc)
         {
 
             intensity = DDA(gc, Tpo, p1, pn);
-            outputImage->val[p] = (int)(255.0 * intensity);
+            
+            outputImage->val[p] = intensity;
         }
 
         iftDestroyMatrix(&Mtemp);
@@ -751,7 +697,7 @@ int main(int argc, char *argv[])
     output   = CurvLinear(gc);
     printf("Done\n");
 
-    sprintf(buffer, "data/test2.png");
+    sprintf(buffer, "data/test4.png");
 
     iftImage *normalizedImage= iftNormalize(output,0,255);
 
