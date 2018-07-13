@@ -4,6 +4,8 @@
 #include "CL.h"
 
 
+int thresholding;
+
 int sign( int x ){
     if(x >= 0)
         return 1;
@@ -81,7 +83,7 @@ float DDA(GraphicalContext* gc, iftMatrix* Tp0, iftVector p1, iftVector pn)
         {
             if (gc->object[gc->label->val[idx]].visibility != 0)
             {
-                if (gc->tde->val[idx] >= 30){
+                if (gc->tde->val[idx] >= thresholding){
                     // N.x  = -gc->phong->normal[gc->normal->val[idx]].x;
                     // N.y  = -gc->phong->normal[gc->normal->val[idx]].y;
                     // N.z  = -gc->phong->normal[gc->normal->val[idx]].z;
@@ -690,14 +692,14 @@ int main(int argc, char *argv[])
     iftImage *img = iftReadImageByExt(imgFileName);
     iftImage *imgLabel = iftReadImageByExt(imgLabelFileName);
 
-    tilt = atof(argv[3]);
-    spin = atof(argv[4]);
-
+    tilt = atof(argv[4]);
+    spin = atof(argv[5]);
+    thresholding= atoi(argv[6]);
     gc = createGC(img, imgLabel, tilt, spin);
     output   = CurvLinear(gc);
     printf("Done\n");
 
-    sprintf(buffer, "data/test4.png");
+    sprintf(buffer, "data/%.1f%.1f_%.1d%s", spin, tilt, thresholding, argv[3]);
 
     iftImage *normalizedImage= iftNormalize(output,0,255);
 
